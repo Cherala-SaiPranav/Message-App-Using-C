@@ -3,19 +3,69 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <pthread.h>
 
+#define max_clients 5
 #define port 8080
 #define buffer_size 1024
 
+typedef struct {
+    int socket;
+    struct sockaddr_in addr;
+}Client;
+
+Client clients[max_clients];
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// broadcasting message to all clients except the sender
+void broadcast_message(char *message, int sender_socket) {
+    pthread_mutex_lock(&clients_mutex);
+    for(int i = 0; i < max_clients; i++) {
+        if(clients[i].socket != sender_socket && clients[i].socket != 0) {
+            send(clients[i].socket, message, strlen(message), 0);
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+}
+
+//function to handle communication
+
+//the function and arg is a pointer because pthread_create expects pointers as it's arguments
+void *handle_client(void *arg) { 
+
+     // typrcasting the argument back into Client struct type
+    Client *client = (Client *)arg;
+
+    char buffer[buffer_size];
+    int bytes_read;
+
+    // receiving message from client
+    while((bytes_read = recv(client->socket, buffer, buffer_size - 1, 0)) > 0) {
+        // adding the null character at last
+        buffer[bytes_read] = '\0';
+        broadcast_message(buffer, client->socket);
+    }
+
+    // removing the client after being disconnected
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < max_clients; i++) {
+        if (clients[i].socket == client->socket) {
+            clients[i].socket = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+
+    close(client->socket);
+    free(client);
+    return NULL;
+}
+    
 int main() {
     int server_fd, new_socket;
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    char buffer[buffer_size] = {0};
-    char message[buffer_size];
-    int server_status = 1;
-    int process;
-
+    socklen_t addrlen = sizeof(address);
+    
     //create a socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket Creation Failed.");
@@ -34,78 +84,41 @@ int main() {
     }
 
     // Listening for connections
-    if(listen(server_fd, 5) < 0) {
+    if(listen(server_fd, max_clients) < 0) {
         perror("Failed Listen");
         exit(EXIT_FAILURE);
     }
 
     printf("server listening on port %d\n", port);
 
-    //Accepting client's connection request
-    if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
-        perror("Accepting client failed.");
-    }
+    while(1) {
+        new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
+        if (new_socket < 0) {
+            printf("Accept failed.");
+            continue;
+        }
 
-    printf("Client Connection Successfull.\n");
+        // using malloc to dynamically allocate memory to clients
+        Client *new_client = (Client *)malloc(sizeof(Client));
+        new_client->socket = new_socket;
+        new_client->addr = address;
 
-
-    while(server_status) {
-
-        printf("Enter '0' to stop server.\nEnter '1' to send a message to client\nEnter '2' to check for new messages\n");
-        scanf("%d", &process);
-        getchar();
-
-        if (process == 0) {
-
-            server_status = 0;
-
-            //Closing sockets
-            close(new_socket);
-            close(server_fd);
-
-            break;
-
-        } else if (process == 1) {
-
-            printf("Enter the message.\n");
-            fgets(message, sizeof(message), stdin);
-
-            // Remove the trailing newline
-            message[strcspn(message, "\n")] = '\0';
-
-            //sending message to client
-            send(new_socket, message, strlen(message)+ 1, 0);
-
-        }else if (process == 2) {
-
-            //clear buffer before reading
-            memset(buffer, 0, buffer_size);
-            
-            //receive data from client
-            int RecData = read(new_socket, buffer, buffer_size - 1);
-            
-            if (RecData > 0) {
-
-                //Null terminate the received data
-                buffer[RecData] = '\0';
-                printf("Received from client: %s\n", buffer);
-            
-            } else if (RecData == 0) {
-                
-                printf("Client disconnected.\n");
-
-                //Closing sockets
-                close(new_socket);
-                close(server_fd);
-                
+        //storing client info
+        pthread_mutex_lock(&clients_mutex);
+        for (int i = 0; i < max_clients; i++) {
+            if (clients[i].socket == 0) {
+                clients[i] = *new_client;
                 break;
             }
-        
-        }else if (process < 0 || process > 2){
-
-            printf("Wrong Input.\nTry again.\n");
         }
+        pthread_mutex_unlock(&clients_mutex);
+
+        //creating a seperate thread for each client
+        pthread_t client_thread;
+        pthread_create(&client_thread, NULL, handle_client, (void *) new_client);
+        pthread_detach(&client_thread);
     }
 
+    close(server_fd);
     return 0;
 }
