@@ -3,18 +3,32 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define server_ip "127.0.0.1"
 #define port 8080
 #define buffer_size 1024
 
+int sock;
+
+// Function to receive messages
+void *receive_messages(void *arg) {
+    char buffer[buffer_size];
+    while(1) {
+        memset(buffer, 0, buffer_size);
+        int msgval = recv(sock, buffer, buffer_size - 1, 0);
+        if (msgval <= 0) {
+            printf("server down.\n");
+            exit(0);
+        }
+        printf("New Message:\n%s\n", buffer);
+    }
+    return NULL;
+}
+
 int main() {
-    int sock;
     struct sockaddr_in server_addr;
-    char buffer[buffer_size] = {0};
-    char message[buffer_size];
-    int connection = 1;
-    int process;
+    char buffer[buffer_size];
 
     //create a socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -27,10 +41,7 @@ int main() {
     server_addr.sin_port = htons(port);
 
     //Converting IP string into binary form
-    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
-        perror("Converting IP string into binary form failed.\n");
-        exit(EXIT_FAILURE);
-    }
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
     //connecting to server
     if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
@@ -39,41 +50,24 @@ int main() {
     }
     printf("Connected to server.\n");
 
+    pthread_t recv_msg_thread;
+    pthread_create(&recv_msg_thread, NULL, receive_messages, NULL);
+    pthread_detach(&recv_msg_thread);
 
-    printf("%s\n", buffer);
-    while(connection){
-        printf("Enter '0' to disconnect from server.\nEnter '1' to send a message to server\nEnter '2' to check for new messages.\n");
-        scanf("%d", &process);
-        getchar();
-        if (process == 0) {
-            connection = 0;
-            //closing socket
-            close(sock);
+    while(1) {
+        memset(buffer, 0, buffer_size);
+        fgets(buffer, buffer_size, stdin);
+
+        // replacing newline character with NULL
+        buffer[strcspn(buffer, "\n")] = '\0'; 
+        
+        if(strcmp(buffer, "exit") == 0) {
+            printf("Disconnecting....\n");
             break;
-        } else if (process == 1) {
-
-            printf("Enter the message.\n");
-            fgets(message, sizeof(message), stdin);
-            // Remove the trailing newline
-            message[strcspn(message, "\n")] = '\0';
-            //sending data to server
-            send(sock, message, strlen(message) + 1, 0);
-            printf("Message sent to server.\n");
-
-        } else if(process == 2) {
-
-        //Receicing data form server
-        int Recdata = read(sock, buffer, buffer_size);
-        if (Recdata > 0) {
-            //Null terminate the received data
-            buffer[Recdata] = '\0';
-            printf("Received from server: %s\n", buffer);
         }
-        }else if(process < 0 || process > 2){
-            printf("Wrong Input.\nTry again.\n");
-        }
-
+        send(sock, buffer, strlen(buffer), 0);
     }
 
+    close(sock);
     return 0;
 }
