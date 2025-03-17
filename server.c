@@ -20,9 +20,20 @@ pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 // broadcasting message to all clients except the sender
 void broadcast_message(char *message, int sender_socket) {
     pthread_mutex_lock(&clients_mutex);
+    char Modified_msg[buffer_size];
+
+    //Adding sender's info to message
+    for(int i = 0; i < buffer_size; i++) {
+        if (clients[i].socket == sender_socket) {
+            snprintf(Modified_msg, buffer_size, "From: %s:%d\n%s", inet_ntoa(clients[i].addr.sin_addr), ntohs(clients[i].addr.sin_port), message);
+            break;
+        }
+    }
+
+    //sending message
     for(int i = 0; i < max_clients; i++) {
         if(clients[i].socket != sender_socket && clients[i].socket != 0) {
-            send(clients[i].socket, message, strlen(message), 0);
+            send(clients[i].socket, Modified_msg, strlen(Modified_msg), 0);
         }
     }
     pthread_mutex_unlock(&clients_mutex);
