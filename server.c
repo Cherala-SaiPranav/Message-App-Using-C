@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define max_clients 5
 #define port 8080
@@ -16,16 +17,25 @@ typedef struct {
 
 Client clients[max_clients];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+volatile sig_atomic_t server_running = 1;
+int server_fd;
+
+//funtion to shutdown server
+void server_shutdown(int sig) {
+    printf("\nShutting down server....\n");
+    server_running = 0;
+    close(server_fd);
+}
 
 // broadcasting message to all clients except the sender
 void broadcast_message(char *message, int sender_socket) {
     pthread_mutex_lock(&clients_mutex);
-    char Modified_msg[buffer_size];
+    char Modified_msg[buffer_size] = {0};
 
     //Adding sender's info to message
     for(int i = 0; i < buffer_size; i++) {
         if (clients[i].socket == sender_socket) {
-            snprintf(Modified_msg, buffer_size, "From: %s:%d\n%s", inet_ntoa(clients[i].addr.sin_addr), ntohs(clients[i].addr.sin_port), message);
+            snprintf(Modified_msg, buffer_size, "\tFrom: %s:%d\n\tMessage: %s", inet_ntoa(clients[i].addr.sin_addr), ntohs(clients[i].addr.sin_port), message);
             break;
         }
     }
@@ -73,9 +83,10 @@ void *handle_client(void *arg) {
 }
     
 int main() {
-    int server_fd, new_socket;
+    int new_socket;
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
+    char buffer[buffer_size];
     
     //create a socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -102,15 +113,38 @@ int main() {
 
     printf("server listening on port %d\n", port);
 
-    while(1) {
+    //When SIGINT(ctrl+c) happens run server_shutdown function
+    signal(SIGINT, server_shutdown);
+
+    while(server_running) {
         new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
         if (new_socket < 0) {
+            if (!server_running) break;
             printf("Accept failed.");
             continue;
         }
 
+        pthread_mutex_lock(&clients_mutex);
+        int client_count = 0;
+        for (int i = 0; i < max_clients; i++) {
+            if (clients[i].socket != 0) {
+                client_count++;
+                if (client_count >= max_clients) {
+                    printf("Max clients capacity reached. rejecting new connections...\n");
+                    close(new_socket);
+                    continue;
+                }
+            }
+        }
+        pthread_mutex_unlock(&clients_mutex);
+
         // using malloc to dynamically allocate memory to clients
         Client *new_client = (Client *)malloc(sizeof(Client));
+        if(!new_client) {
+            perror("Memory allocation failed.\n");
+            close(new_socket);
+            continue;
+        }
         new_client->socket = new_socket;
         new_client->addr = address;
 
@@ -122,6 +156,7 @@ int main() {
                 break;
             }
         }
+
         pthread_mutex_unlock(&clients_mutex);
 
         //creating a seperate thread for each client
@@ -129,6 +164,17 @@ int main() {
         pthread_create(&client_thread, NULL, handle_client, (void *) new_client);
         pthread_detach(&client_thread);
     }
+    
+    //Closing all active clients before shutdown
+    printf("Closing all client's connection....\n");
+    pthread_mutex_lock(&clients_mutex);
+    for(int i = 0; i < max_clients; i++) {
+        if(clients[i].socket != 0) {
+            close(clients[i].socket);
+            clients[i].socket = 0;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
 
     close(server_fd);
     return 0;
