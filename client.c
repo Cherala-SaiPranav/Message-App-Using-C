@@ -25,7 +25,7 @@ void disconnect(int sig) {
 // Function to receive messages
 void *receive_messages(void *arg) {
     char buffer[buffer_size];
-    while(1) {
+    while(client_connection) {
         memset(buffer, 0, buffer_size);
         int msgval = recv(sock, buffer, buffer_size - 1, 0);
         if (msgval <= 0) {
@@ -64,11 +64,25 @@ int main() {
         exit(EXIT_FAILURE);
     }
     printf("Connected to server.\n");
+
+    
+    //Asking client for a unique identifying name
+    printf("Enter your unique username: ");
+    fgets(buffer, 50, stdin);
+    buffer[strcspn(buffer, "\n")] == '\0';
+    
+    //sending the unique name to server for registring the name
+    if(send(sock, buffer, strlen(buffer), 0) < 0) {
+        printf("Failed to send username.\n");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+    
+    signal(SIGINT, disconnect);
     
     pthread_create(&recv_msg_thread, NULL, receive_messages, NULL);
     pthread_detach(&recv_msg_thread);
     
-    signal(SIGINT, disconnect);
 
     while(client_connection) {
         memset(buffer, 0, buffer_size);
@@ -76,6 +90,9 @@ int main() {
         
         // replacing newline character with NULL
         buffer[strcspn(buffer, "\n")] = '\0'; 
+
+        //Ignoring any empty messages
+        if (strlen(buffer) == 0) continue;
         
         if(send(sock, buffer, strlen(buffer), 0) < 0) {
             printf("Failed to send the message.");

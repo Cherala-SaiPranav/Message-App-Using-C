@@ -13,12 +13,34 @@
 typedef struct {
     int socket;
     struct sockaddr_in addr;
+    char unique_name[50];
 }Client;
 
-Client clients[max_clients];
+Client *clients[max_clients];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 volatile sig_atomic_t server_running = 1;
 int server_fd;
+
+//function for private messaging
+void private_message(char *message, char *recipient_name, int sender_socket) {
+    pthread_mutex_lock(&clients_mutex);
+    int found = 0;
+
+    for(int i = 0; i < max_clients; i++) {
+        if(clients[i] && strcmp(clients[i]->unique_name, recipient_name) == 0) {
+            send(clients[i]->socket, message, strlen(message), 0);
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+
+    if(!found) {
+        char error_message[buffer_size];
+        snprintf(error_message, buffer_size, "User %s not found.", recipient_name);
+        send(sender_socket, error_message, strlen(error_message), 0);
+    }
+}
 
 //funtion to shutdown server
 void server_shutdown(int sig) {
@@ -33,24 +55,24 @@ void broadcast_message(char *message, int sender_socket) {
     char Modified_msg[buffer_size] = {0};
 
     //Adding sender's info to message
-    for(int i = 0; i < buffer_size; i++) {
-        if (clients[i].socket == sender_socket) {
-            snprintf(Modified_msg, buffer_size, "\tFrom: %s:%d\n\tMessage: %s", inet_ntoa(clients[i].addr.sin_addr), ntohs(clients[i].addr.sin_port), message);
+    for(int i = 0; i < max_clients; i++) {
+        printf("%s\n", clients[i]->unique_name);
+        if (clients[i]->socket == sender_socket) {
+            snprintf(Modified_msg, buffer_size, "\tFrom: %s:%d\n\tMessage: %s", inet_ntoa(clients[i]->addr.sin_addr), ntohs(clients[i]->addr.sin_port), message);
             break;
         }
     }
 
     //sending message
     for(int i = 0; i < max_clients; i++) {
-        if(clients[i].socket != sender_socket && clients[i].socket != 0) {
-            send(clients[i].socket, Modified_msg, strlen(Modified_msg), 0);
+        if(clients[i]->socket != sender_socket && clients[i]) {
+            send(clients[i]->socket, Modified_msg, strlen(Modified_msg), 0);
         }
     }
     pthread_mutex_unlock(&clients_mutex);
 }
 
 //function to handle communication
-
 //the function and arg is a pointer because pthread_create expects pointers as it's arguments
 void *handle_client(void *arg) { 
 
@@ -60,18 +82,64 @@ void *handle_client(void *arg) {
     char buffer[buffer_size];
     int bytes_read;
 
+    //receive client's name
+    bytes_read = recv(client->socket, client->unique_name, sizeof(client->unique_name) - 1, 0);
+    if (bytes_read <= 0) {
+        close(client->socket);
+        free(client);
+        return NULL;
+    }
+    client->unique_name[bytes_read] = '\0';
+
+    //storing unique name in clients shared array
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0;i < max_clients; i++) {
+        if(!clients[i]) {
+            clients[i] = client;
+            break;
+        }
+    }
+    printf("%s connected to server successfully.\n", client->unique_name);
+    pthread_mutex_unlock(&clients_mutex);
+
     // receiving message from client
     while((bytes_read = recv(client->socket, buffer, buffer_size - 1, 0)) > 0) {
         // adding the null character at last
         buffer[bytes_read] = '\0';
-        broadcast_message(buffer, client->socket);
+
+        // private Message by extracting recipient name and message
+        if(buffer[0] == '@') {
+            char recipient[50], msg[buffer_size];
+            char *space_position = strchr(buffer, ' ');
+            if (space_position) {
+
+                // splitting recipient and message
+                *space_position = '\0';
+                strcpy(recipient, buffer + 1);
+                printf("Sending message to %s", recipient);
+                strcpy(msg, space_position + 1);
+                printf("the message is %s", msg);
+            
+                char formatted_message[buffer_size];
+                snprintf(formatted_message, buffer_size, "@%s (Private Message): %s", client->unique_name, msg);
+                private_message(formatted_message, recipient, client->socket);
+            } else {
+                char error_message[] = "Invalid private message format. Correct format: @recipient-username Message";
+                send(client->socket, error_message, strlen(error_message), 0);
+            }
+        } else {
+            // broadcaasting message to all clients
+            char formatted_message[buffer_size];
+            snprintf(formatted_message, buffer_size, "%s: %s", client->unique_name, buffer);
+            broadcast_message(formatted_message, client->socket);
+        }
     }
 
     // removing the client after being disconnected
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < max_clients; i++) {
-        if (clients[i].socket == client->socket) {
-            clients[i].socket = 0;
+        if (clients[i] == client) {
+            clients[i] = NULL;
             break;
         }
     }
@@ -127,15 +195,18 @@ int main() {
         pthread_mutex_lock(&clients_mutex);
         int client_count = 0;
         for (int i = 0; i < max_clients; i++) {
-            if (clients[i].socket != 0) {
+            if (clients[i] != NULL) {
                 client_count++;
-                if (client_count >= max_clients) {
-                    printf("Max clients capacity reached. rejecting new connections...\n");
-                    close(new_socket);
-                    continue;
-                }
             }
         }
+
+        if (client_count >= max_clients) {
+            pthread_mutex_unlock(&clients_mutex);
+            printf("Max clients capacity reached. rejecting new connections...\n");
+            close(new_socket);
+            continue;
+        }
+        
         pthread_mutex_unlock(&clients_mutex);
 
         // using malloc to dynamically allocate memory to clients
@@ -148,14 +219,14 @@ int main() {
         new_client->socket = new_socket;
         new_client->addr = address;
 
-        //storing client info
-        pthread_mutex_lock(&clients_mutex);
-        for (int i = 0; i < max_clients; i++) {
-            if (clients[i].socket == 0) {
-                clients[i] = *new_client;
-                break;
-            }
-        }
+        // //storing client info
+        // pthread_mutex_lock(&clients_mutex);
+        // for (int i = 0; i < max_clients; i++) {
+        //     if (clients[i].socket == 0) {
+        //         clients[i] = *new_client;
+        //         break;
+        //     }
+        // }
 
         pthread_mutex_unlock(&clients_mutex);
 
@@ -169,9 +240,9 @@ int main() {
     printf("Closing all client's connection....\n");
     pthread_mutex_lock(&clients_mutex);
     for(int i = 0; i < max_clients; i++) {
-        if(clients[i].socket != 0) {
-            close(clients[i].socket);
-            clients[i].socket = 0;
+        if(clients[i]) {
+            close(clients[i]->socket);
+            clients[i] = NULL;
         }
     }
     pthread_mutex_unlock(&clients_mutex);
